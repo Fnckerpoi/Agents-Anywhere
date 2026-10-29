@@ -1,3 +1,4 @@
+.toolchain/
 .gradle/
 .kotlin/
 build/

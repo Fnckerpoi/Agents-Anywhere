@@ -56,6 +56,49 @@ prevents an in-place update of an installed app signed with another key.
 `local.properties` remains machine-specific and ignored. The manifest allows
 HTTP for local/self-hosted addresses; use HTTPS for public service endpoints.
 
+## Embedded payload build
+
+Turbo-IO hosts the Agents Anywhere interface inside its own APK, so this module
+also builds a payload variant that the host loads as an asset:
+
+```bash
+./gradlew :app:embedPayloadSidecar
+```
+
+This produces `app/build/outputs/embedded/aa-embedded-payload.apk` and the
+`app/build/outputs/embedded/payload.json` sidecar, which pins the artifact
+hash, the ABI version and the entry class
+`com.agentsanywhere.embedded.PayloadEntry` that the host calls through
+reflection. The host owns authentication, saved configuration and every task
+dispatch. The payload browses sessions and history, edits configuration drafts,
+and routes explicit saves, session takeover and task actions through the host
+bridge. Browsing a session does not change the active task binding.
+
+The payload archive is rewritten after assembly so that it carries no native
+library at all. The host process already owns those libraries, and a second
+copy in the same process would collide by name. The standalone application is
+not affected: it keeps its own 28 native libraries, which the terminal, editor
+and QR-scanning features need.
+
+No packaging exclusion is configured on the build variants, because an
+`android.packaging` block still applies to every variant in AGP 8 and would
+strip the native libraries from the standalone application too. Run the gate
+script after building to confirm both properties hold. It compares every payload
+member with the original embeddedDebug APK (including DEX and resources.arsc);
+only native libraries and old signing metadata may be removed. Standalone and
+embedded DEX are different variants and are not compared. The sidecar must have
+exactly schemaVersion, abiVersion, entry and sha256, with the payload hash matching.
+Default artifact paths resolve against the script directory, regardless of the
+current working directory. To override the original embedded APK path, pass
+`-SourceApk <original-embeddedDebug.apk>` (the third positional parameter).
+The current assemble output is
+`app/build/outputs/apk/embeddedDebug/app-embeddedDebug.apk`:
+
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/verify_payload_gate.ps1
+```
+
 ## Application updates
 
 After entering the signed-in app, Android reads the saved server's

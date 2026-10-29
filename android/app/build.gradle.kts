@@ -1,3 +1,7 @@
+import java.security.MessageDigest
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import java.util.Properties
 
 plugins {
@@ -22,6 +26,7 @@ fun String.asBuildConfigString(): String = "\"" + replace("\\", "\\\\")
 android {
     namespace = "com.agentsanywhere.app"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "com.agentsanywhere.app"
@@ -40,6 +45,13 @@ android {
     buildTypes {
         debug {
             buildConfigField("String", "OFFICIAL_SERVER_URL", debugServerUrl.asBuildConfigString())
+        }
+        create("embeddedDebug") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".embedded.payload"
+            matchingFallbacks += "debug"
+            // The assembled APK retains native dependencies; embedPayloadSidecar removes them
+            // from the host-loaded archive. The embedded surface does not load native code.
         }
         release {
             isMinifyEnabled = false
@@ -118,6 +130,66 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
+// The embedded payload keeps every Java/Kotlin dependency of the main source set: the terminal,
+// editor and QR screens are compiled into this variant and reference these libraries, so removing
+// them would break the build. embedPayloadSidecar strips native libraries from the final
+// payload archive, and the embedded surface never loads a native library.
+
 tasks.named("check") {
     dependsOn(rootProject.tasks.named("checkLegacyRoutes"))
+}
+
+// Embedded payload contract: the host loads this APK from an asset and calls
+// com.agentsanywhere.embedded.PayloadEntry through reflection. The sidecar pins the artifact
+// identity so the host can reject a stale or swapped payload before loading it.
+val embedPayloadSidecar by tasks.registering {
+    group = "distribution"
+    description = "Copies the embedded payload APK and writes the sidecar manifest for the host loader."
+    dependsOn("assembleEmbeddedDebug")
+    val payloadApk = layout.buildDirectory.file("outputs/apk/embeddedDebug/app-embeddedDebug.apk")
+    val outputDir = layout.buildDirectory.dir("outputs/embedded")
+    val entryClass = "com.agentsanywhere.embedded.PayloadEntry"
+    val schemaVersion = 1
+    val abiVersion = 1
+    inputs.file(payloadApk).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.property("schemaVersion", schemaVersion)
+    inputs.property("abiVersion", abiVersion)
+    inputs.property("entryClass", entryClass)
+    outputs.dir(outputDir)
+    doLast {
+        val source = payloadApk.get().asFile
+        check(source.isFile) { "Missing embedded payload APK: ${source.absolutePath}" }
+        val destinationDir = outputDir.get().asFile
+        destinationDir.mkdirs()
+        val copied = File(destinationDir, "aa-embedded-payload.apk")
+        // Plan A: Strip native libraries by rewriting the APK archive, preserving all other members,
+        // dex and resources.arsc intact. The standalone application keeps its own native libraries
+        // because no packaging exclusion is configured on the build variants.
+        ZipFile(source).use { zipIn ->
+        ZipOutputStream(copied.outputStream().buffered()).use { out ->
+            for (entry in zipIn.entries()) {
+                if (entry.name.matches(Regex("^lib/[^/]+/[^/]+[.]so$"))) continue
+                if (entry.name.matches(Regex("^META-INF/(MANIFEST[.]MF|[^/]+[.](SF|RSA|DSA|EC))$", RegexOption.IGNORE_CASE))) continue
+                val newEntry = ZipEntry(entry.name)
+                newEntry.time = entry.time
+                out.putNextEntry(newEntry)
+                zipIn.getInputStream(entry).use { it.copyTo(out) }
+                out.closeEntry()
+            }
+        }
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(copied.readBytes()).joinToString("") { byte -> "%02x".format(byte) }
+        val sidecar = File(destinationDir, "payload.json")
+        sidecar.writeText(
+            """{
+  "schemaVersion": $schemaVersion,
+  "abiVersion": $abiVersion,
+  "entry": "$entryClass",
+  "sha256": "$hash"
+}
+""",
+        )
+        logger.lifecycle("Embedded payload sidecar written: ${sidecar.absolutePath}")
+    }
 }

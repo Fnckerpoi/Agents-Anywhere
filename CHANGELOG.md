@@ -8,6 +8,10 @@
 
 - Connector 上报的时间线条目序号超出范围时只拒绝这条上报，同批其他消息照常保存，不再让整个会话之后的消息都存不进数据库；升级前已经积压的条目会按原顺序排到时间线末尾保存，持续写入失败的会话也不再每秒重试刷屏日志。（[#464](https://github.com/anywhere-labs/Agents-Anywhere/pull/464)）
 
+### Android
+
+- Turbo-IO 嵌入工作台支持浏览会话、显式保存调度配置和会话参数并通过宿主发送任务，浏览不改变当前绑定；首次展开配置时短暂加载失败会自动重试一次，配置变化或退出后停止重试，持续失败时保留当前选择且不自动保存。
+
 ## 2.1.0（2026-10-27）
 
 [发布说明](docs/releases/2.1.0.md) · [GitHub Release](https://github.com/anywhere-labs/Agents-Anywhere/releases/tag/v2.1.0) · [与 2.0.3 的差异](https://github.com/anywhere-labs/Agents-Anywhere/compare/v2.0.3...v2.1.0)

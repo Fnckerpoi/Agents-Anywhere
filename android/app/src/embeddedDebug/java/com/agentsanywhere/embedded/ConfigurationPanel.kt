@@ -62,32 +62,17 @@ internal fun ConfigurationPanel(bridge: HostBridge, identity: AccountIdentity, o
                 for (level in ConfigurationPresentation.homeLevels) {
                     val captured = draft ?: break
                     if (captured.selected[level]?.id.isNullOrBlank() || ConfigurationInteraction.parentHint(level, captured) != null) continue
-                    var validated = withContext(Dispatchers.IO) { bridge.call("selection.draft.list", captured.request().apply {
-                        putString("level", level.wire); putLong("requestId", ticket.sequence)
-                    }) }
-                    if (disposed || !requests.owns(ticket)) return@launch
-                    if (!validated.getBoolean("ok") && validated.getString("errorCode") == "DIRECTORY_FAILED") {
-                        // Transient failure during bootstrap: retry once to avoid degrading to raw IDs
-                        validated = withContext(Dispatchers.IO) { bridge.call("selection.draft.list", captured.request().apply {
-                            putString("level", level.wire); putLong("requestId", ticket.sequence)
-                        }) }
-                        if (disposed || !requests.owns(ticket)) return@launch
+                    val result = validateBootstrapLevel(
+                        captured, ConfigTicket(ticket.sequence, captured.id, captured.revision, captured.generation, level),
+                        requests, currentDraft = { draft }, isActive = { !disposed },
+                    ) { args -> withContext(Dispatchers.IO) { bridge.call("selection.draft.list", args) } }
+                    when (result) {
+                        is BootstrapResult.Validated -> draft = result.draft
+                        is BootstrapResult.Failed -> { failure = ConfigurationText.failure(result.code); return@launch }
+                        BootstrapResult.Mismatched -> { failure = "配置验证响应不匹配，请重试。"; return@launch }
+                        BootstrapResult.Stale -> { dropLocalDraft(ConfigurationText.needingReload); return@launch }
+                        BootstrapResult.Obsolete -> return@launch
                     }
-                    if (!validated.matchesDraft(ConfigTicket(ticket.sequence, captured.id, captured.revision, captured.generation, level)) ||
-                        validated.getLong("requestId", -1) != ticket.sequence || validated.getString("level") != level.wire) {
-                        if (ConfigurationText.isStale(validated.getString("errorCode"))) dropLocalDraft(ConfigurationText.needingReload) else failure = "配置验证响应不匹配，请重试。"
-                        return@launch
-                    }
-                    if (!validated.getBoolean("ok")) {
-                        val code = validated.getString("errorCode").orEmpty()
-                        if (ConfigurationText.isStale(code)) dropLocalDraft(ConfigurationText.needingReload) else failure = ConfigurationText.failure(code)
-                        return@launch
-                    }
-                    val next = validated.configDraft()
-                    if (next == null || next.id != captured.id || next.generation != captured.generation || !validated.matchesParents(captured)) {
-                        dropLocalDraft(ConfigurationText.needingReload); return@launch
-                    }
-                    draft = next
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { if (!disposed && requests.owns(ticket)) failure = "配置加载失败，请重试。" }
