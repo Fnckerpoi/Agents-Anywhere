@@ -67,19 +67,35 @@ internal fun EmbeddedWorkbench(host: Activity, bridge: HostBridge, owner: Payloa
         val ticket = epoch.begin()
         busy = true; problem = null
         scope.launch {
+            val diagnostics = SessionLoadDiagnostics()
             try {
-                val auth = withContext(Dispatchers.IO) { bridge.call("auth.snapshot") }
-                if (!epoch.owns(ticket)) return@launch
-                applySnapshot(auth)
-                if (!auth.getBoolean("authenticated")) { problem = "请在Agent-Anywhere设置中登录后查看会话。"; return@launch }
-                val page = withContext(Dispatchers.IO) {
-                    api.listSessions(auth.text("origin", "serverOrigin"), auth.text("token", "accessToken"), false)
+                val auth = diagnostics.at(SessionLoadStage.AUTH_SNAPSHOT) {
+                    withContext(Dispatchers.IO) { bridge.call("auth.snapshot") }
                 }
-                val fresh = withContext(Dispatchers.IO) { bridge.call("auth.snapshot") }
                 if (!epoch.owns(ticket)) return@launch
-                if (fresh.binding().identity != auth.binding().identity) { applySnapshot(fresh); return@launch }
-                applySnapshot(fresh)
-                sessions = page.sessions.map { it.toAgentSession(emptyMap()) }
+                val authenticated = diagnostics.at(SessionLoadStage.AUTH_APPLY) {
+                    applySnapshot(auth)
+                    auth.getBoolean("authenticated")
+                }
+                if (!authenticated) { problem = "请在Agent-Anywhere设置中登录后查看会话。"; return@launch }
+                val page = diagnostics.at(SessionLoadStage.SESSION_REQUEST) {
+                    withContext(Dispatchers.IO) {
+                        api.listSessions(auth.text("origin", "serverOrigin"), auth.text("token", "accessToken"), false)
+                    }
+                }
+                val fresh = diagnostics.at(SessionLoadStage.AUTH_RECHECK) {
+                    withContext(Dispatchers.IO) { bridge.call("auth.snapshot") }
+                }
+                if (!epoch.owns(ticket)) return@launch
+                val identityChanged = diagnostics.at(SessionLoadStage.IDENTITY_CHECK) {
+                    val changed = fresh.binding().identity != auth.binding().identity
+                    applySnapshot(fresh)
+                    changed
+                }
+                if (identityChanged) return@launch
+                sessions = diagnostics.at(SessionLoadStage.SESSION_MAPPING) {
+                    page.sessions.map { it.toAgentSession(emptyMap()) }
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { if (epoch.owns(ticket)) problem = "Could not load sessions. Refresh to try again." }
             finally { if (epoch.owns(ticket)) busy = false }
